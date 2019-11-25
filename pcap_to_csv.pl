@@ -12,11 +12,11 @@ use Text::CSV qw( csv );
 
 =head1 NAME
 
-blah.pl - A script that does something
+pcap_to_csv.pl - Convert a PCAP file to a CSV file.
 
 =head1 SYNOPSIS
 
-./blah.pl [options] file
+./pcap_to_csv.pl pcap_file
 
 =head2 OPTIONS
 
@@ -28,61 +28,86 @@ blah.pl - A script that does something
 
 =head1 DESCRIPTION
 
-B<blah.pl> will do something
+B<pcap_to_csv.pl> converts a PCAP file to a CSV. It wraps around tshark.
 
 =cut
 
 my %args;
 
 GetOptions(\%args,
-    "option=s",
     "help" => sub { pod2usage(1) }
 ) or pod2usage(2);
 
-# Run a tshark report
-can_run('tshark') or croak "Can't run tshark";
-my ($success, $err, $buffer, $stdout, $stderr) = run(
-    command => ['tshark', '-G', ''],
-    verbose => 0,
-    timeout => 20
-);
 
-my @field_report = split("\n", join('', @{ $buffer }));
+main(@ARGV);
 
-my @dissector_names;
-foreach (@field_report) {
-    my $dissector = (split("\t", $_))[2];
 
-    next if $dissector =~ m{^(http\.file_data)};
-    next unless $dissector =~ m{^(frame|ethernet|arp|icmp|ip|udp|tcp|ssl|http)\.};
+sub main {
+    my ($pcap_filename) = @_;
 
-    push @dissector_names, $dissector;
+    my @dissector_names = dissector_names();
+
+    my $packet_dissection = raw_tshark_csv($pcap_filename, @dissector_names);
+    
+    csv(
+        out => "$pcap_filename.csv",
+        in => csv({
+                in => \$packet_dissection,
+                sep_char => "|",
+                quote_char => '',
+                headers => 'auto'
+            })
+    );
 }
 
 
-my $export_command = [
-    'tshark', '-r', $ARGV[0], 
-    '-E', 'header=y', '-E', "separator=|", '-E', 'occurrence=f', '-E', 'quote=n',
-    '-T', 'fields',
-    map { ('-e', $_) } @dissector_names
-];
 
-#say STDERR "Command: " . join ' ', @{ $export_command };
+sub dissector_names {
+    # Check if tshark is available
+    can_run('tshark') or croak "Can't run tshark";
 
-($success, $err, $buffer, $stdout, $stderr) = run(
-    command => $export_command,
-    verbose => 0,
-    timeout => 20
-);
+    # Run the tshark 'fields' report
+    my ($success, $err, $buffer, $stdout, $stderr) = run(
+        command => ['tshark', '-G', ''],
+        verbose => 0,
+        timeout => 20
+    );
 
-my $packet_dissection = join '', @{$buffer};
+    # Join the buffer together
+    my @field_report = split("\n", join('', @{ $buffer }));
+   
+    # Extract the relevant dissectors
+    my @dissector_names;
+    foreach (@field_report) {
+        my $dissector = (split("\t", $_))[2];
+    
+        next if $dissector =~ m{^(http\.file_data)};
+        next unless $dissector =~ m{^(frame|ethernet|arp|icmp|ip|udp|tcp|ssl|http)\.};
+    
+        push @dissector_names, $dissector;
+    }
 
-csv(
-    out => 'out.csv',
-    in => csv({
-            in => \$packet_dissection,
-            sep_char => "|",
-            quote_char => '',
-            headers => 'auto'
-        })
-);
+    return sort @dissector_names;
+}
+
+
+
+sub raw_tshark_csv {
+    my ($pcap_filename, @dissector_names) = @_;
+
+    my $export_command = [
+        'tshark', '-r', $pcap_filename, 
+        '-E', 'header=y', '-E', "separator=|", '-E', 'occurrence=f', '-E', 'quote=n',
+        '-T', 'fields',
+        map { ('-e', $_) } @dissector_names
+    ];
+    
+    my ($success, $err, $buffer, $stdout, $stderr) = run(
+        command => $export_command,
+        verbose => 0,
+        timeout => 20
+    );
+    
+    return join '', @{$buffer};
+}
+
