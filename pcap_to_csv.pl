@@ -8,7 +8,10 @@ use Pod::Usage;
 use Carp;
 
 use IPC::Cmd qw(can_run run);
-use Text::CSV qw( csv );
+use JSON;
+use Text::Table;
+use Hash::Fold qw(flatten);
+use Text::CSV qw(csv);
 
 =head1 NAME
 
@@ -16,13 +19,15 @@ pcap_to_csv.pl - Convert a PCAP file to a CSV file.
 
 =head1 SYNOPSIS
 
-./pcap_to_csv.pl pcap_file
+./pcap_to_csv.pl [-rp] <file.pcap>
 
 =head2 OPTIONS
 
 =over 4
 
-=item B<-o|--option> - 
+=item B<-r|--regex> 
+
+=item B<-p|--print-fields> 
 
 =back
 
@@ -32,39 +37,65 @@ B<pcap_to_csv.pl> converts a PCAP file to a CSV. It wraps around tshark.
 
 =cut
 
-my %args;
+{
+    my %args;
 
-GetOptions(\%args,
-    "help" => sub { pod2usage(1) }
-) or pod2usage(2);
-
-
-main(@ARGV);
+    GetOptions(\%args,
+        "regex=s",
+        "print-fields",
+        "help" => sub { pod2usage(1) }
+    ) or pod2usage(2);
+    
+    
+    main(%args);
+}
 
 
 sub main {
-    my ($pcap_filename) = @_;
+    my %args = @_;
+    my ($pcap_filename) = @ARGV;
 
-    my @dissector_names = dissector_names();
+    say "Gathering dissectors...";
+    my @dissectors = dissectors($args{regex});
 
-    my $packet_dissection = raw_tshark_csv($pcap_filename, @dissector_names);
-    
+    # If the --print-fields|-p option is used, we print a table of the 
+    # dissectors selected with their names, then exit
+    if ($args{'print-fields'}) {
+        my $table = Text::Table->new("Abbreviation", "Name");
+        $table->load( map { [ $_->{abbrev}, $_->{name} ] } @dissectors );
+        print $table;
+        exit(2);
+    }
+
+    say "Extracting packets...";
+    my $packet_dissection = tshark_json($pcap_filename, @dissectors);
+
+    # Decode the JSON
+    say "Decoding JSON...";
+    my $json_packets = JSON->new->decode($packet_dissection) or die "Could not decode JSON\n";
+
+    my %column_headings;
+    my @packet_rows;
+    say "Flattening packets...";
+
+    @packet_rows = map { flatten($_->{_source}{layers}) } @{ $json_packets };
+
+    say "Creating $pcap_filename.csv";
     csv(
-        out => "$pcap_filename.csv",
-        in => csv({
-                in => \$packet_dissection,
-                sep_char => "|",
-                quote_char => '',
-                headers => 'auto'
-            })
+        in => \@packet_rows, 
+        out => "$pcap_filename.csv"
     );
+
 }
 
 
 
-sub dissector_names {
+sub dissectors {
+    my ($regex) = @_;
+    $regex //= qr(^(frame|ethernet|ip|arp|tcp|udp|http|smb)\.);
+
     # Check if tshark is available
-    can_run('tshark') or croak "Can't run tshark";
+    can_run('tshark') or die "Can't run tshark - is it installed?\n";
 
     # Run the tshark 'fields' report
     my ($success, $err, $buffer, $stdout, $stderr) = run(
@@ -73,41 +104,52 @@ sub dissector_names {
         timeout => 20
     );
 
+    die "tshark -G command failed to run correctly: ".join('', @{$stderr})."\n" unless $success;
+
     # Join the buffer together
     my @field_report = split("\n", join('', @{ $buffer }));
    
     # Extract the relevant dissectors
-    my @dissector_names;
+    my @dissectors;
     foreach (@field_report) {
-        my $dissector = (split("\t", $_))[2];
+        my %dissector;
+        @dissector{ qw(type name abbrev ftenum parent base bitmask blurb) } = split "\t";
+
+        # We only want fields ('F'), not parents ('P')
+        next unless $dissector{type} eq 'F';
+
+        # Some blurbs are undefined
+        $dissector{blurb} //= '';
+
+        next unless $dissector{abbrev} =~ m{$regex};
     
-        next if $dissector =~ m{^(http\.file_data)};
-        next unless $dissector =~ m{^(frame|ethernet|arp|icmp|ip|udp|tcp|ssl|http)\.};
-    
-        push @dissector_names, $dissector;
+        push @dissectors, \%dissector;
     }
 
-    return sort @dissector_names;
+    return @dissectors;
 }
 
 
 
-sub raw_tshark_csv {
-    my ($pcap_filename, @dissector_names) = @_;
+
+sub tshark_json {
+    my ($pcap_filename, @dissectors) = @_;
 
     my $export_command = [
         'tshark', '-r', $pcap_filename, 
-        '-E', 'header=y', '-E', "separator=|", '-E', 'occurrence=f', '-E', 'quote=n',
-        '-T', 'fields',
-        map { ('-e', $_) } @dissector_names
+        '-T', 'json',
+        map { ('-e', $_->{abbrev}) } @dissectors
     ];
-    
+
+    #say STDERR "Command: ".join(' ', @{$export_command});
+
     my ($success, $err, $buffer, $stdout, $stderr) = run(
         command => $export_command,
         verbose => 0,
         timeout => 20
     );
-    
-    return join '', @{$buffer};
-}
 
+    die "Could not extract packets: ".join(' ',@{$stderr}) unless $success;
+
+    return join '', @{$stdout};
+}
