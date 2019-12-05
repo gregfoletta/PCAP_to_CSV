@@ -92,7 +92,7 @@ sub main {
 
 sub dissectors {
     my ($regex) = @_;
-    $regex //= qr(^(frame|ethernet|ip|arp|tcp|udp|http|smb)\.);
+    $regex //= qr(^(frame|eth|ip|arp|tcp|udp|http|smb)\.);
 
     # Check if tshark is available
     can_run('tshark') or die "Can't run tshark - is it installed?\n";
