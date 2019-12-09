@@ -8,7 +8,7 @@ use Pod::Usage;
 use Carp;
 
 use IPC::Cmd qw(can_run run);
-use JSON;
+use JSON::XS;
 use Text::Table;
 use Hash::Fold qw(flatten);
 use Text::CSV qw(csv);
@@ -72,18 +72,30 @@ sub main {
 
     # Decode the JSON
     say "Decoding JSON...";
-    my $json_packets = JSON->new->decode($packet_dissection) or die "Could not decode JSON\n";
+    my $json_packets = JSON::XS->new->decode($packet_dissection) or die "Could not decode JSON\n";
 
     my %column_headings;
     my @packet_rows;
     say "Flattening packets...";
+    for my $json_packet (@{ $json_packets }) {
 
-    @packet_rows = map { flatten($_->{_source}{layers}) } @{ $json_packets };
+        # Flatten all the keys and push them on to our array
+        my $flat_packet = flatten($json_packet->{_source}{layers});
+        push @packet_rows, $flat_packet;
+
+        # Keep track of all of the keys which will be used as
+        # column headers in the CSV
+        @column_headings{ keys %{ $flat_packet } } = ();
+    }
+
+    my @column_headings = sort keys %column_headings;
+    #@packet_rows = map { { %{ $_ }{ @column_headings } } } @packet_rows;
 
     say "Creating $pcap_filename.csv";
     csv(
         in => \@packet_rows, 
-        out => "$pcap_filename.csv"
+        out => "$pcap_filename.csv",
+        headers => [ @column_headings ]
     );
 
 }
@@ -121,7 +133,7 @@ sub dissectors {
         # Some blurbs are undefined
         $dissector{blurb} //= '';
 
-        next unless $dissector{abbrev} =~ m{$regex};
+        next unless $dissector{abbrev} =~ m{$regex} or $dissector{abbrev} =~ m{^frame\.number};
     
         push @dissectors, \%dissector;
     }
@@ -141,7 +153,7 @@ sub tshark_json {
         map { ('-e', $_->{abbrev}) } @dissectors
     ];
 
-    #say STDERR "Command: ".join(' ', @{$export_command});
+    # say STDERR "Command: ".join(' ', @{$export_command});
 
     my ($success, $err, $buffer, $stdout, $stderr) = run(
         command => $export_command,
